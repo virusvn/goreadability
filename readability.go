@@ -66,6 +66,9 @@ type Option struct {
 	// MaxImageCount is the maximum number of images for a web page.
 	MaxImageCount int
 
+	// CheckImageSize is the flag for check image's size or not
+	CheckImageSize bool
+
 	// CheckImageLoopCount is the number of images for parallel requests to fetch the image size.
 	// For example, if this value is set to 10,
 	// the first 10 image sources in img tag will be requested.
@@ -94,6 +97,7 @@ func NewOption() *Option {
 		WeightClasses:                true,
 		CleanConditionally:           true,
 		RemoveEmptyNodes:             true,
+		CheckImageSize:               true,
 		MinImageWidth:                200,
 		MinImageHeight:               100,
 		MaxImageCount:                3,
@@ -113,6 +117,7 @@ func copyOption(o *Option) *Option {
 		WeightClasses:                o.WeightClasses,
 		CleanConditionally:           o.CleanConditionally,
 		RemoveEmptyNodes:             o.RemoveEmptyNodes,
+		CheckImageSize:               o.CheckImageSize,
 		MinImageWidth:                o.MinImageWidth,
 		MinImageHeight:               o.MinImageHeight,
 		MaxImageCount:                o.MaxImageCount,
@@ -174,6 +179,7 @@ var patterns = newPattern()
 type Content struct {
 	Title       string
 	Description string
+	Content     string
 	Author      string
 	Images      []Image
 }
@@ -194,9 +200,18 @@ func Extract(reqURL string, opt *Option) (*Content, error) {
 // otherwise use Extract(reqURL, opt).
 func ExtractFromDocument(doc *goquery.Document, reqURL string, opt *Option) (*Content, error) {
 	title := strings.TrimSpace(doc.Find("title").First().Text())
+	desc, _ := doc.Find("meta[name=description]").Attr("content")
+	content := description(doc, opt)
+	if desc == "" {
+		desc, _ = doc.Find("meta[property=og:description]").Attr("content")
+		if desc == "" {
+			desc = firstWords(content, 80) + "..."
+		}
+	}
 	return &Content{
 		Title:       title,
-		Description: description(doc, opt),
+		Description: desc,
+		Content:     content,
 		Images:      images(doc, reqURL, opt),
 	}, nil
 }
@@ -667,7 +682,16 @@ func images(doc *goquery.Document, reqURL string, opt *Option) []Image {
 		loopCnt += 1
 		w, _ := strconv.Atoi(s.AttrOr("width", "0"))
 		h, _ := strconv.Atoi(s.AttrOr("height", "0"))
-		go func() { ch <- checkImageSize(src, w, h, opt) }()
+		if opt.CheckImageSize {
+			go func() { ch <- checkImageSize(src, w, h, opt) }()
+		} else {
+			go func() {
+				ch <- &Image{
+					URL:  src,
+					Size: &fastimage.ImageSize{Width: uint32(0), Height: uint32(0)},
+				}
+			}()
+		}
 		return true
 	})
 
@@ -675,7 +699,9 @@ func images(doc *goquery.Document, reqURL string, opt *Option) []Image {
 	for {
 		select {
 		case result := <-ch:
-			if result.Size != nil &&
+			if !opt.CheckImageSize {
+				imgs = append(imgs, *result)
+			} else if result.Size != nil &&
 				result.Size.Width >= opt.MinImageWidth &&
 				result.Size.Height >= opt.MinImageHeight {
 				imgs = append(imgs, *result)
@@ -762,4 +788,19 @@ func isValidURLStr(s string) bool {
 		return false
 	}
 	return u.Scheme == "http" || u.Scheme == "https"
+}
+func firstWords(value string, count int) string {
+	// Loop over all indexes in the string.
+	for i := range value {
+		// If we encounter a space, reduce the count.
+		if value[i] == ' ' {
+			count -= 1
+			// When no more words required, return a substring.
+			if count == 0 {
+				return value[0:i]
+			}
+		}
+	}
+	// Return the entire string.
+	return value
 }
